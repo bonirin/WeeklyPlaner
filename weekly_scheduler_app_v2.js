@@ -344,9 +344,10 @@
       const startH = st.getHours() + st.getMinutes() / 60;
       const top = (startH - workStart) * hourHeight;
       const height = durH * hourHeight;
+      const compactBreak = height < 52;
 
       return `
-        <div class="breakBlock" style="top:${top}px; height:${height}px;" data-break-id="${escapeAttr(br.breakId)}">
+        <div class="breakBlock ${compactBreak ? 'compact' : ''}" style="top:${top}px; height:${height}px;" data-break-id="${escapeAttr(br.breakId)}">
           <div class="resizeHandle top" onmousedown="startResizeBreak(event, '${escapeAttr(br.breakId)}', true)"></div>
           <div class="breakLabel">Break</div>
           <div class="removeBreak" onclick="removeBreak('${escapeAttr(br.breakId)}')">x</div>

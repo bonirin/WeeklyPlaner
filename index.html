@@ -457,10 +457,10 @@
 
     .breakBlock{
       position:absolute;
-      left: 10px;
-      right: 10px;
+      left: 0;
+      right: 0;
       border: 2px dashed rgba(100,116,139,0.4);
-      border-radius: 14px;
+      border-radius: 12px;
       background: repeating-linear-gradient(
         45deg,
         rgba(248,250,252,0.5),
@@ -472,8 +472,17 @@
       display:flex;
       align-items:center;
       justify-content:center;
-      overflow: hidden;
-      min-height: 40px;
+      overflow: visible;
+      min-height: 18px;
+    }
+
+    .breakBlock.compact .breakLabel{
+      display:none;
+    }
+
+    .breakBlock.compact .removeBreak{
+      top: 50%;
+      transform: translateY(-50%);
     }
 
     .breakBlock .breakLabel{
@@ -486,6 +495,7 @@
       padding: 4px 12px;
       border-radius: 999px;
       border: 1px solid rgba(226,232,240,0.8);
+      pointer-events:none;
     }
 
     .breakBlock .removeBreak{
@@ -505,6 +515,7 @@
       font-size: 14px;
       font-weight: bold;
       transition: all 0.2s ease;
+      z-index: 9;
     }
 
     .breakBlock .removeBreak:hover{
@@ -514,31 +525,38 @@
 
     .breakBlock .resizeHandle{
       position: absolute;
-      left: 0;
-      right: 0;
-      height: 8px;
+      left: -2px;
+      right: -2px;
+      height: 18px;
       cursor: ns-resize;
-      z-index: 5;
+      z-index: 8;
     }
 
     .breakBlock .resizeHandle.top{
-      top: 0;
+      top: -9px;
     }
 
     .breakBlock .resizeHandle.bottom{
-      bottom: 0;
+      bottom: -9px;
     }
 
-    .breakBlock .resizeHandle:hover::before{
+    .breakBlock .resizeHandle::before{
       content: '';
       position: absolute;
       left: 50%;
       top: 50%;
       transform: translate(-50%, -50%);
-      width: 30px;
+      width: 40px;
       height: 3px;
-      background: rgba(100,116,139,0.4);
+      background: rgba(100,116,139,0.35);
+      opacity: 0.45;
       border-radius: 999px;
+      transition: opacity .15s ease, width .15s ease;
+    }
+
+    .breakBlock .resizeHandle:hover::before{
+      opacity: 0.95;
+      width: 54px;
     }
 
     .taskEdge{
@@ -912,6 +930,6 @@
 <body>
   <div class="app" id="app"></div>
 
-<script src="weekly_scheduler_app_v2.js?v=20260209-2342"></script>
+<script src="weekly_scheduler_app_v2.js?v=20260209-2350"></script>
 </body>
 </html>
