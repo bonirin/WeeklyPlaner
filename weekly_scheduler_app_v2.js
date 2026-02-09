@@ -6,7 +6,9 @@
     // State & constants
     // ------------------------------
     const STORAGE_KEY = 'weekly_scheduler_v1';
-    const LEGACY_STORAGE_KEYS = ['weeklySchedulerState'];
+    const LEGACY_STORAGE_KEY = 'weeklySchedulerState';
+    const DEBUG = true;
+    const APP_BUILD = '2026-02-09T23:42:00Z';
 
     /** @typedef {{ id:string; name:string; createdAt:string; deadline:string; initialEstimateMs:number; estimateMs:number; loggedMs:number; status:'active'|'done'|'archived'; completedAt?:string; lastProgressAt?:string; lastEditedAt?:string; }} Task */
     /** @typedef {{ taskId:string; start:string; end:string; }} Segment */
@@ -22,31 +24,63 @@
       timeStepMin: 15
     };
 
+    const HOUR_MS = 3600000;
+    const MIN_MS = 60000;
+    const DAY_MS = 24 * HOUR_MS;
+    const MIN_BREAK_MS = 5 * MIN_MS;
+
     /** @type {State} */
     let state = loadState();
 
     // Ensure breaks array exists
     if (!Array.isArray(state.breaks)) state.breaks = [];
 
-    const HOUR_MS = 3600000;
-    const MIN_MS = 60000;
-    const DAY_MS = 24 * HOUR_MS;
-    const MIN_BREAK_MS = 5 * MIN_MS;
-
     const runtime = {
       activeTaskId: null,
       activeStartedAt: null
     };
+    const splitLogMemo = new Set();
 
     let lastMinuteKey = '';
     let modalStack = [];
 
     if (!Array.isArray(state.schedule)) state.schedule = [];
     if (!Array.isArray(state.breaks)) state.breaks = [];
+    debugLog('script_loaded', { build: APP_BUILD, href: location.href, storageKey: STORAGE_KEY });
     rebuildSchedule('boot', false);
     render();
     setInterval(tick, 1000);
     initializeAutoPersistence();
+    window.schedulerDebug = {
+      dumpStorage(){
+        const primary = localStorage.getItem(STORAGE_KEY);
+        const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+        const info = {
+          href: location.href,
+          storageKey: STORAGE_KEY,
+          hasPrimary: !!primary,
+          primaryBytes: primary ? primary.length : 0,
+          hasLegacy: !!legacy,
+          legacyBytes: legacy ? legacy.length : 0,
+          inMemory: {
+            tasks: (state.tasks || []).length,
+            schedule: (state.schedule || []).length,
+            breaks: (state.breaks || []).length,
+            lastScheduledAt: state.lastScheduledAt
+          }
+        };
+        console.log('[WeeklyScheduler debug] storage_dump', info);
+        return info;
+      },
+      forceSave(label = 'manual'){
+        saveState(state, `manual:${label}`);
+      },
+      clearStorage(){
+        clearStoredState();
+        console.log('[WeeklyScheduler debug] storage_cleared');
+      }
+    };
+    debugLog('debug_helpers_ready', 'window.schedulerDebug.dumpStorage()');
 
     function tick(){
       const now = new Date();
@@ -58,7 +92,7 @@
       } else {
         const changed = syncActiveRuntime(now);
         if (changed){
-          saveState(state);
+          saveState(state, 'tick:runtime_changed');
         }
       }
 
@@ -66,7 +100,7 @@
     }
 
     function initializeAutoPersistence(){
-      const flush = () => saveState(state);
+      const flush = () => saveState(state, 'autosave:timer_or_lifecycle');
       setInterval(flush, 10000);
       window.addEventListener('beforeunload', flush);
       window.addEventListener('pagehide', flush);
@@ -203,6 +237,7 @@
         if (!task) return;
         daySegs.push(...splitSegmentByDeadline(seg, task));
       });
+      daySegs.sort((a, b) => new Date(a.start) - new Date(b.start));
 
       const items = [];
       daySegsRaw.forEach(seg => items.push({ start: seg.startMs, end: seg.endMs, type: 'task' }));
@@ -386,6 +421,17 @@
       }
 
       if (isFinite(deadlineMs) && deadlineMs > startMs && deadlineMs < endMs){
+        const splitKey = `${task.id}|${startMs}|${endMs}|${deadlineMs}`;
+        if (!splitLogMemo.has(splitKey)){
+          splitLogMemo.add(splitKey);
+          debugLog('deadline_split', {
+            taskId: task.id,
+            taskName: task.name,
+            segmentStart: new Date(startMs).toISOString(),
+            deadline: new Date(deadlineMs).toISOString(),
+            segmentEnd: new Date(endMs).toISOString()
+          });
+        }
         return [
           {
             taskId: seg.taskId,
@@ -646,7 +692,7 @@
           };
 
           state.tasks.push(task);
-          saveState(state);
+          saveState(state, 'task:new');
           rebuildSchedule('new task');
           closeModal();
         };
@@ -734,7 +780,7 @@
           task.loggedMs = logged * HOUR_MS;
           task.lastEditedAt = getIso(new Date());
 
-          saveState(state);
+          saveState(state, 'task:edit');
           rebuildSchedule('task edited');
           closeModal();
         };
@@ -1041,7 +1087,7 @@
           state.settings.workDays = days;
           state.settings.timeStepMin = isFinite(step) ? step : state.settings.timeStepMin;
 
-          saveState(state);
+          saveState(state, 'settings:save');
           rebuildSchedule('settings saved');
           closeModal();
         };
@@ -1104,7 +1150,7 @@
             state = sanitizeState(data);
             runtime.activeTaskId = null;
             runtime.activeStartedAt = null;
-            saveState(state);
+            saveState(state, 'data:import');
             rebuildSchedule('import');
             closeModal();
           }catch(err){
@@ -1220,11 +1266,19 @@
     // ------------------------------
     function rebuildSchedule(reason, shouldRender = true){
       const activeTasks = state.tasks.filter(t => t.status === 'active');
+      splitLogMemo.clear();
+      debugLog('rebuild_start', {
+        reason,
+        activeTasks: activeTasks.length,
+        breaks: (state.breaks || []).length,
+        stepMin: state.settings.timeStepMin
+      });
       state.breaks = normalizeBreakCollection(state.breaks, state.settings);
       state.schedule = buildSchedule(new Date(), activeTasks, state.settings, state.breaks);
       state.lastScheduledAt = getIso(new Date());
       syncActiveRuntime(new Date());
-      saveState(state);
+      debugLog('rebuild_done', { reason, segments: state.schedule.length, breaks: state.breaks.length });
+      saveState(state, `rebuild:${reason}`);
       if (shouldRender) render();
     }
 
@@ -1514,6 +1568,24 @@
       return ms;
     }
 
+    function debugLog(event, payload){
+      if (!DEBUG) return;
+      if (typeof payload === 'undefined'){
+        console.log('[WeeklyScheduler debug]', event);
+      } else {
+        console.log('[WeeklyScheduler debug]', event, payload);
+      }
+    }
+
+    function debugWarn(event, payload){
+      if (!DEBUG) return;
+      if (typeof payload === 'undefined'){
+        console.error('[WeeklyScheduler debug]', event);
+      } else {
+        console.error('[WeeklyScheduler debug]', event, payload);
+      }
+    }
+
     // ------------------------------
     // Storage
     // ------------------------------
@@ -1557,53 +1629,118 @@
 
     function loadState(forceFresh=false){
       if (!forceFresh){
-        const keysToTry = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
-        for (const key of keysToTry){
-          try{
-            const text = localStorage.getItem(key);
-            if (!text) continue;
+        let stage = 'init';
+        let textForDebug = '';
+        try{
+          debugLog('load_attempt', { key: STORAGE_KEY, href: location.href });
 
+          let loadedFrom = STORAGE_KEY;
+          stage = 'read_primary';
+          let text = localStorage.getItem(STORAGE_KEY);
+          textForDebug = text || '';
+          if (!text){
+            stage = 'read_legacy';
+            const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+            if (legacy){
+              text = legacy;
+              textForDebug = legacy;
+              loadedFrom = LEGACY_STORAGE_KEY;
+              localStorage.removeItem(LEGACY_STORAGE_KEY);
+              debugLog('legacy_migrated_to_primary', { from: LEGACY_STORAGE_KEY, to: STORAGE_KEY, bytes: legacy.length });
+            }
+          }
+
+          if (text){
+            debugLog('load_found', { key: loadedFrom, bytes: text.length });
+            stage = 'parse_json';
             const raw = JSON.parse(text);
+            stage = 'sanitize_state';
             const cleaned = sanitizeState(raw);
+            stage = 'rebuild_schedule';
             cleaned.schedule = buildSchedule(new Date(), cleaned.tasks.filter(t => t.status === 'active'), cleaned.settings, cleaned.breaks);
             cleaned.lastScheduledAt = getIso(new Date());
-            saveState(cleaned);
+            stage = 'persist_cleaned';
+            saveState(cleaned, `load:migrated_from:${loadedFrom}`);
+            stage = 'log_success';
+            debugLog('load_success', {
+              key: STORAGE_KEY,
+              tasks: cleaned.tasks.length,
+              breaks: cleaned.breaks.length,
+              schedule: cleaned.schedule.length
+            });
+            stage = 'return_cleaned';
             return cleaned;
-          }catch(e){
-            // ignore invalid data in this key and continue searching
           }
+        }catch(e){
+          debugWarn('load_failed', {
+            stage,
+            error: String((e && e.message) ? e.message : e),
+            stack: e && e.stack ? String(e.stack) : '',
+            textBytes: textForDebug ? textForDebug.length : 0,
+            textPreview: textForDebug ? textForDebug.slice(0, 180) : ''
+          });
         }
       }
 
       const fresh = { settings: { ...DEFAULT_SETTINGS }, tasks: [], schedule: [], breaks: [], lastScheduledAt: getIso(new Date()) };
-      saveState(fresh);
+      debugLog('load_fresh_state');
+      saveState(fresh, 'load:fresh_state');
       return fresh;
     }
 
-    function saveState(st){
-      const persistable = {
-        settings: st.settings,
-        tasks: st.tasks,
-        breaks: st.breaks,
-        lastScheduledAt: st.lastScheduledAt
-      };
-
+    function saveState(st, source = 'unknown'){
       try{
-        const payload = JSON.stringify(persistable);
-        localStorage.setItem(STORAGE_KEY, payload);
+        const fullPayload = JSON.stringify(st);
+        localStorage.setItem(STORAGE_KEY, fullPayload);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+        debugLog('save_success_full', {
+          source,
+          key: STORAGE_KEY,
+          bytes: fullPayload.length,
+          tasks: (st.tasks || []).length,
+          breaks: (st.breaks || []).length,
+          schedule: (st.schedule || []).length
+        });
       }catch(e){
-        console.warn('Could not persist scheduler state to localStorage.', e);
+        debugWarn('save_full_failed_retry_compact', {
+          source,
+          key: STORAGE_KEY,
+          error: String((e && e.message) ? e.message : e)
+        });
+        try{
+          const compact = {
+            settings: st.settings,
+            tasks: st.tasks,
+            breaks: st.breaks,
+            lastScheduledAt: st.lastScheduledAt,
+            schedule: []
+          };
+          const compactPayload = JSON.stringify(compact);
+          localStorage.setItem(STORAGE_KEY, compactPayload);
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
+          debugWarn('save_compact_fallback_success', {
+            source,
+            key: STORAGE_KEY,
+            bytes: compactPayload.length,
+            tasks: (st.tasks || []).length,
+            breaks: (st.breaks || []).length
+          });
+        }catch(e2){
+          debugWarn('save_compact_failed', {
+            source,
+            key: STORAGE_KEY,
+            error: String((e2 && e2.message) ? e2.message : e2)
+          });
+        }
       }
     }
 
     function clearStoredState(){
-      const keysToClear = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
-      for (const key of keysToClear){
-        try{
-          localStorage.removeItem(key);
-        }catch(e){
-          // ignore
-        }
+      try{
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }catch(e){
+        // ignore
       }
     }
 
@@ -1623,4 +1760,3 @@
     }
 
   })();
-
