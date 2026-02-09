@@ -5,7 +5,8 @@
     // ------------------------------
     // State & constants
     // ------------------------------
-    const STORAGE_KEY = 'weeklySchedulerState';
+    const STORAGE_KEY = 'weekly_scheduler_v1';
+    const LEGACY_STORAGE_KEYS = ['weeklySchedulerState'];
 
     /** @typedef {{ id:string; name:string; createdAt:string; deadline:string; initialEstimateMs:number; estimateMs:number; loggedMs:number; status:'active'|'done'|'archived'; completedAt?:string; lastProgressAt?:string; lastEditedAt?:string; }} Task */
     /** @typedef {{ taskId:string; start:string; end:string; }} Segment */
@@ -45,6 +46,7 @@
     rebuildSchedule('boot', false);
     render();
     setInterval(tick, 1000);
+    initializeAutoPersistence();
 
     function tick(){
       const now = new Date();
@@ -61,6 +63,16 @@
       }
 
       render();
+    }
+
+    function initializeAutoPersistence(){
+      const flush = () => saveState(state);
+      setInterval(flush, 10000);
+      window.addEventListener('beforeunload', flush);
+      window.addEventListener('pagehide', flush);
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) flush();
+      });
     }
 
     // ------------------------------
@@ -172,17 +184,29 @@
       const dow = day.toLocaleDateString('en-US', { weekday: 'short' });
       const isToday = isSameDay(day, now);
 
-      const daySegs = segments
-        .filter(seg => isSameDay(new Date(seg.start), day))
-        .sort((a, b) => new Date(a.start) - new Date(b.start));
+      const taskById = new Map(tasks.map(t => [t.id, t]));
+      const workWindow = getWorkWindowForDay(day, state.settings);
 
-      const dayBreaks = breaks
-        .filter(br => isSameDay(new Date(br.start), day))
-        .sort((a, b) => new Date(a.start) - new Date(b.start));
+      const daySegsRaw = segments
+        .map(seg => clipSegmentToWindow(seg, workWindow.startMs, workWindow.endMs))
+        .filter(Boolean)
+        .sort((a, b) => a.startMs - b.startMs);
+
+      const dayBreaks = normalizeBreakCollection(breaks, state.settings)
+        .map(br => clipBreakToWindow(br, workWindow.startMs, workWindow.endMs))
+        .filter(Boolean)
+        .sort((a, b) => a.startMs - b.startMs);
+
+      const daySegs = [];
+      daySegsRaw.forEach(seg => {
+        const task = taskById.get(seg.taskId);
+        if (!task) return;
+        daySegs.push(...splitSegmentByDeadline(seg, task));
+      });
 
       const items = [];
-      daySegs.forEach(seg => items.push({ start: new Date(seg.start).getTime(), end: new Date(seg.end).getTime(), type: 'task' }));
-      dayBreaks.forEach(br => items.push({ start: new Date(br.start).getTime(), end: new Date(br.end).getTime(), type: 'break' }));
+      daySegsRaw.forEach(seg => items.push({ start: seg.startMs, end: seg.endMs, type: 'task' }));
+      dayBreaks.forEach(br => items.push({ start: br.startMs, end: br.endMs, type: 'break' }));
       items.sort((a, b) => a.start - b.start);
 
       const connectors = [];
@@ -224,6 +248,8 @@
 
       const st = new Date(seg.start);
       const en = new Date(seg.end);
+      if (!isFinite(st.getTime()) || !isFinite(en.getTime()) || en <= st) return '';
+
       const durH = (en - st) / HOUR_MS;
 
       const startH = st.getHours() + st.getMinutes() / 60 + st.getSeconds() / 3600;
@@ -231,9 +257,13 @@
       const height = durH * hourHeight;
 
       const isCurrent = now.getTime() >= st.getTime() && now.getTime() < en.getTime();
-      const isPastDeadline = en.getTime() > new Date(task.deadline).getTime();
+      const isPastDeadline = typeof seg.pastDeadline === 'boolean'
+        ? seg.pastDeadline
+        : en.getTime() > new Date(task.deadline).getTime();
       const compact = height < 92;
       const progress = isCurrent ? clamp((now.getTime() - st.getTime()) / Math.max(1, en.getTime() - st.getTime()), 0, 1) : 0;
+      const showTopEdge = seg.showTopEdge !== false;
+      const showBottomEdge = seg.showBottomEdge !== false;
 
       const cls = [
         isCurrent ? 'current' : '',
@@ -243,7 +273,7 @@
 
       return `
         <div class="taskBlock ${cls}" style="top:${top}px; height:${height}px;" onclick="openTaskQuick('${escapeAttr(seg.taskId)}')">
-          <div class="taskEdge top" onclick="event.stopPropagation(); createBreakAtEdge('${escapeAttr(seg.start)}', true);"></div>
+          ${showTopEdge ? `<div class="taskEdge top" onclick="event.stopPropagation(); createBreakAtEdge('${escapeAttr(seg.start)}', true);"></div>` : ''}
           ${isCurrent ? `
             <div class="taskProgress">
               <div class="taskProgressFill" style="height:${progress * 100}%;"></div>
@@ -264,7 +294,7 @@
               <button class="taskAction danger" onclick="event.stopPropagation(); deleteTask('${escapeAttr(task.id)}')">Delete</button>
             </div>
           </div>
-          <div class="taskEdge bottom" onclick="event.stopPropagation(); createBreakAtEdge('${escapeAttr(seg.end)}', false);"></div>
+          ${showBottomEdge ? `<div class="taskEdge bottom" onclick="event.stopPropagation(); createBreakAtEdge('${escapeAttr(seg.end)}', false);"></div>` : ''}
         </div>
       `;
     }
@@ -272,6 +302,8 @@
     function renderBreak(br, workStart, hourHeight){
       const st = new Date(br.start);
       const en = new Date(br.end);
+      if (!isFinite(st.getTime()) || !isFinite(en.getTime()) || en <= st) return '';
+
       const durH = (en - st) / HOUR_MS;
 
       const startH = st.getHours() + st.getMinutes() / 60;
@@ -297,27 +329,106 @@
       return `<div class="timeLine" data-now-label="${escapeAttr(label)}" style="top:${top}px;"></div>`;
     }
 
+    function getWorkWindowForDay(day, settings){
+      const dayStart = startOfDay(day);
+      const workStartMin = parseTimeMinutes(settings.workStart);
+      const workEndMin = parseTimeMinutes(settings.workEnd);
+
+      return {
+        startMs: dayStart.getTime() + (workStartMin * MIN_MS),
+        endMs: dayStart.getTime() + (workEndMin * MIN_MS)
+      };
+    }
+
+    function clipSegmentToWindow(seg, windowStartMs, windowEndMs){
+      const segStart = new Date(seg.start).getTime();
+      const segEnd = new Date(seg.end).getTime();
+      if (!isFinite(segStart) || !isFinite(segEnd)) return null;
+
+      const clippedStart = Math.max(segStart, windowStartMs);
+      const clippedEnd = Math.min(segEnd, windowEndMs);
+      if (clippedEnd <= clippedStart) return null;
+
+      return {
+        taskId: seg.taskId,
+        start: getIso(new Date(clippedStart)),
+        end: getIso(new Date(clippedEnd)),
+        startMs: clippedStart,
+        endMs: clippedEnd
+      };
+    }
+
+    function clipBreakToWindow(br, windowStartMs, windowEndMs){
+      const breakStart = new Date(br.start).getTime();
+      const breakEnd = new Date(br.end).getTime();
+      if (!isFinite(breakStart) || !isFinite(breakEnd)) return null;
+
+      const clippedStart = Math.max(breakStart, windowStartMs);
+      const clippedEnd = Math.min(breakEnd, windowEndMs);
+      if (clippedEnd <= clippedStart) return null;
+
+      return {
+        breakId: br.breakId,
+        start: getIso(new Date(clippedStart)),
+        end: getIso(new Date(clippedEnd)),
+        startMs: clippedStart,
+        endMs: clippedEnd
+      };
+    }
+
+    function splitSegmentByDeadline(seg, task){
+      const startMs = new Date(seg.start).getTime();
+      const endMs = new Date(seg.end).getTime();
+      const deadlineMs = new Date(task.deadline).getTime();
+
+      if (!isFinite(startMs) || !isFinite(endMs) || endMs <= startMs){
+        return [];
+      }
+
+      if (isFinite(deadlineMs) && deadlineMs > startMs && deadlineMs < endMs){
+        return [
+          {
+            taskId: seg.taskId,
+            start: getIso(new Date(startMs)),
+            end: getIso(new Date(deadlineMs)),
+            showTopEdge: true,
+            showBottomEdge: false,
+            pastDeadline: false
+          },
+          {
+            taskId: seg.taskId,
+            start: getIso(new Date(deadlineMs)),
+            end: getIso(new Date(endMs)),
+            showTopEdge: false,
+            showBottomEdge: true,
+            pastDeadline: true
+          }
+        ];
+      }
+
+      return [{
+        taskId: seg.taskId,
+        start: getIso(new Date(startMs)),
+        end: getIso(new Date(endMs)),
+        showTopEdge: true,
+        showBottomEdge: true,
+        pastDeadline: isFinite(deadlineMs) ? endMs > deadlineMs : false
+      }];
+    }
+
     // ------------------------------
     // Break creation and management
     // ------------------------------
     window.createBreakAtEdge = function(a, b, c){
-      let edgeTime;
-      let isTop;
-      if (typeof c === 'undefined'){
-        edgeTime = a;
-        isTop = !!b;
-      } else {
-        edgeTime = b;
-        isTop = !!c;
-      }
+      const edgeTime = (typeof c === 'undefined') ? a : b;
 
       const edgeDate = new Date(edgeTime);
       if (!isFinite(edgeDate.getTime())) return;
 
-      const breakStart = isTop ? new Date(edgeDate.getTime() - 30 * MIN_MS) : new Date(edgeDate.getTime());
-      const breakEnd = isTop ? new Date(edgeDate.getTime()) : new Date(edgeDate.getTime() + 30 * MIN_MS);
+      const breakStart = new Date(edgeDate.getTime());
+      const breakEnd = new Date(edgeDate.getTime() + 30 * MIN_MS);
 
-      const clamped = clampBreakToWorkday(breakStart, breakEnd);
+      const clamped = clampBreakToWorkday(breakStart, breakEnd, state.settings);
       if (!clamped) return;
 
       state.breaks.push({
@@ -335,7 +446,7 @@
 
       const breakStart = new Date(at.getTime() - 15 * MIN_MS);
       const breakEnd = new Date(at.getTime() + 15 * MIN_MS);
-      const clamped = clampBreakToWorkday(breakStart, breakEnd);
+      const clamped = clampBreakToWorkday(breakStart, breakEnd, state.settings);
       if (!clamped) return;
 
       state.breaks.push({
@@ -347,11 +458,12 @@
       rebuildSchedule('break connector created');
     };
 
-    function clampBreakToWorkday(start, end){
+    function clampBreakToWorkday(start, end, settings){
       if (end <= start) return null;
 
-      const [wsh, wsm] = state.settings.workStart.split(':').map(Number);
-      const [weh, wem] = state.settings.workEnd.split(':').map(Number);
+      const cfg = settings || DEFAULT_SETTINGS;
+      const [wsh, wsm] = cfg.workStart.split(':').map(Number);
+      const [weh, wem] = cfg.workEnd.split(':').map(Number);
 
       const day = new Date(start);
       day.setHours(0, 0, 0, 0);
@@ -374,6 +486,29 @@
       }
 
       return { start: s, end: e };
+    }
+
+    function normalizeBreakCollection(breaks, settings){
+      const normalized = [];
+
+      for (const br of breaks || []){
+        if (!br || !br.start || !br.end) continue;
+        const bs = new Date(br.start);
+        const be = new Date(br.end);
+        if (!isFinite(bs.getTime()) || !isFinite(be.getTime())) continue;
+
+        const clamped = clampBreakToWorkday(bs, be, settings);
+        if (!clamped) continue;
+
+        normalized.push({
+          breakId: String(br.breakId || br.id || uid()),
+          start: getIso(clamped.start),
+          end: getIso(clamped.end)
+        });
+      }
+
+      normalized.sort((a, b) => new Date(a.start) - new Date(b.start));
+      return normalized;
     }
 
     window.removeBreak = function(breakId){
@@ -876,7 +1011,7 @@
 
         root.querySelector('#reset').onclick = () => {
           if (!confirm('Reset everything? This clears tasks, schedule and settings.')) return;
-          localStorage.removeItem(STORAGE_KEY);
+          clearStoredState();
           state = loadState(true);
           runtime.activeTaskId = null;
           runtime.activeStartedAt = null;
@@ -1085,6 +1220,7 @@
     // ------------------------------
     function rebuildSchedule(reason, shouldRender = true){
       const activeTasks = state.tasks.filter(t => t.status === 'active');
+      state.breaks = normalizeBreakCollection(state.breaks, state.settings);
       state.schedule = buildSchedule(new Date(), activeTasks, state.settings, state.breaks);
       state.lastScheduledAt = getIso(new Date());
       syncActiveRuntime(new Date());
@@ -1098,6 +1234,7 @@
         const db = new Date(b.deadline);
         return da - db;
       });
+      const normalizedBreaks = normalizeBreakCollection(breaks, settings);
 
       const stepMs = (settings.timeStepMin || 15) * MIN_MS;
 
@@ -1134,7 +1271,7 @@
         const daySlots = [];
         while (cursor < dayEnd.getTime()){
           const slotEnd = Math.min(cursor + stepMs, dayEnd.getTime());
-          if (!overlapsBreak(cursor, slotEnd, breaks)){
+          if (!overlapsBreak(cursor, slotEnd, normalizedBreaks)){
             daySlots.push({ start: cursor, end: slotEnd });
           }
           cursor += stepMs;
@@ -1411,37 +1548,63 @@
         .map(x => ({ taskId: String(x.taskId), start: String(x.start), end: String(x.end) }));
 
       const breaks = Array.isArray(raw.breaks) ? raw.breaks : [];
-      const cleanBreaks = breaks
+      const cleanBreaks = normalizeBreakCollection(breaks
         .filter(x => x && x.start && x.end)
-        .map(x => ({ breakId: String(x.breakId || x.id || uid()), start: String(x.start), end: String(x.end) }));
+        .map(x => ({ breakId: String(x.breakId || x.id || uid()), start: String(x.start), end: String(x.end) })), s);
 
       return { settings: s, tasks: cleanTasks, schedule: cleanSchedule, breaks: cleanBreaks, lastScheduledAt: raw.lastScheduledAt };
     }
 
     function loadState(forceFresh=false){
       if (!forceFresh){
-        try{
-          const text = localStorage.getItem(STORAGE_KEY);
-          if (text){
+        const keysToTry = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
+        for (const key of keysToTry){
+          try{
+            const text = localStorage.getItem(key);
+            if (!text) continue;
+
             const raw = JSON.parse(text);
             const cleaned = sanitizeState(raw);
             cleaned.schedule = buildSchedule(new Date(), cleaned.tasks.filter(t => t.status === 'active'), cleaned.settings, cleaned.breaks);
             cleaned.lastScheduledAt = getIso(new Date());
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+            saveState(cleaned);
             return cleaned;
+          }catch(e){
+            // ignore invalid data in this key and continue searching
           }
-        }catch(e){
-          // ignore
         }
       }
 
       const fresh = { settings: { ...DEFAULT_SETTINGS }, tasks: [], schedule: [], breaks: [], lastScheduledAt: getIso(new Date()) };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+      saveState(fresh);
       return fresh;
     }
 
     function saveState(st){
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
+      const persistable = {
+        settings: st.settings,
+        tasks: st.tasks,
+        breaks: st.breaks,
+        lastScheduledAt: st.lastScheduledAt
+      };
+
+      try{
+        const payload = JSON.stringify(persistable);
+        localStorage.setItem(STORAGE_KEY, payload);
+      }catch(e){
+        console.warn('Could not persist scheduler state to localStorage.', e);
+      }
+    }
+
+    function clearStoredState(){
+      const keysToClear = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
+      for (const key of keysToClear){
+        try{
+          localStorage.removeItem(key);
+        }catch(e){
+          // ignore
+        }
+      }
     }
 
     // ------------------------------
