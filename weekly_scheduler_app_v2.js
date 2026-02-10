@@ -28,6 +28,19 @@
     const MIN_MS = 60000;
     const DAY_MS = 24 * HOUR_MS;
     const MIN_BREAK_MS = 5 * MIN_MS;
+    const IDLE_CURRENT_TASK_MESSAGES = [
+      "Don't forget to drink more water",
+      "Its-a me, Mario",
+      'All your base are belong to us',
+      "Don't overdo it",
+      "Shouldn't you be doing something?",
+      "Never take life too seriously",
+      'Woah',
+      'What now? Do you want a medal?',
+      "You've got this!",
+      'Find some time for books',
+      'Click on the task edges to create a break'
+    ];
 
     /** @type {State} */
     let state = loadState();
@@ -37,7 +50,8 @@
 
     const runtime = {
       activeTaskId: null,
-      activeStartedAt: null
+      activeStartedAt: null,
+      idleMessageIndex: Math.floor(Math.random() * IDLE_CURRENT_TASK_MESSAGES.length)
     };
     const splitLogMemo = new Set();
 
@@ -129,20 +143,20 @@
               <div class="buttonLeft">
                 <button id="btnAddTask" type="button" class="btn primary" onclick="openNewTask()">Add task</button>
               </div>
+              <div class="activeNow currentTaskField">
+                ${activeTask ? `
+                  <span class="currentMain">Current task: <b>${escapeHtml(activeTask.name)}</b></span>
+                  <span class="muted">Active for ${formatDurationMs(activeElapsed)} (${formatTimeRange(new Date(activeSeg.start), new Date(activeSeg.end))})</span>
+                ` : `
+                  <span class="currentMain">No active task right now.</span>
+                  <span class="muted">${escapeHtml(getIdleCurrentTaskMessage())}</span>
+                `}
+              </div>
               <div class="buttonRight">
                 <button id="btnReschedule" type="button" class="btn warn" onclick="rescheduleAll()">Reschedule</button>
                 <button id="btnFullTaskList" type="button" class="btn" onclick="openTaskList()">Full task list</button>
                 <button id="btnSettings" type="button" class="btn ghost" onclick="openSettings()">Settings</button>
               </div>
-            </div>
-            <div class="activeNow">
-              ${activeTask ? `
-                <span>Current task: <b>${escapeHtml(activeTask.name)}</b></span>
-                <span class="muted">Active for ${formatDurationMs(activeElapsed)} (${formatTimeRange(new Date(activeSeg.start), new Date(activeSeg.end))})</span>
-              ` : `
-                <span>No active task right now.</span>
-                <span class="muted">Node Reschedule forces full-length; other rebuilds apply assumed progress.</span>
-              `}
             </div>
           </div>
         </header>
@@ -179,11 +193,13 @@
       const workStart = wsh + wsm / 60;
       const workEnd = weh + wem / 60;
       const workHours = Math.max(1, workEnd - workStart);
+      const bottomMarginHours = 1;
+      const visualHours = workHours + bottomMarginHours;
 
       const header = document.querySelector('header');
       const headerHeight = header ? header.getBoundingClientRect().height : 180;
       const availableHeight = Math.max(260, window.innerHeight * 0.95 - headerHeight - 20);
-      const hourHeight = clamp(availableHeight / workHours, 24, 92);
+      const hourHeight = clamp(availableHeight / visualHours, 24, 92);
       document.documentElement.style.setProperty('--hourHeight', `${hourHeight}px`);
 
       const labels = [];
@@ -192,20 +208,24 @@
       }
 
       return `
-        <div class="calendarShell" style="--workHours:${workHours};">
-          <div class="weekGrid">
-            <div class="timeColumn">
-              <div class="timeColumnHeader">Time</div>
-              <div class="timeColumnBody">
-                ${labels.map(h => {
-                  const y = (h - workStart) * hourHeight;
-                  return `<div class="hourLabel" style="top:${y}px;">${formatHour(h)}</div>`;
-                }).join('')}
-              </div>
+        <div class="calendarLayout" style="--workHours:${workHours}; --visualHours:${visualHours};">
+          <div class="timeRail">
+            <div class="timeRailHeader"></div>
+            <div class="timeRailBody">
+              ${labels.map(h => {
+                const y = (h - workStart) * hourHeight;
+                return `<div class="railHourLabel" style="top:${y}px;">${formatHour(h)}</div>`;
+              }).join('')}
+              ${renderNowOutside(now, workStart, workEnd, hourHeight)}
             </div>
-            ${days.map((d, i) => renderDayColumn(d, i, tasks, segments, breaks, now, workStart, workEnd, hourHeight)).join('')}
           </div>
-          ${renderTimeLine(now, workStart, workEnd, hourHeight)}
+          <div class="calendarShell" style="--workHours:${workHours}; --visualHours:${visualHours};">
+            <div class="weekGrid">
+              ${days.map((d, i) => renderDayColumn(d, i, tasks, segments, breaks, now, workStart, workEnd, hourHeight)).join('')}
+            </div>
+            ${renderWorkdayEndLine(workStart, workEnd, hourHeight)}
+            ${renderTimeLine(now, workStart, workEnd, hourHeight)}
+          </div>
         </div>
       `;
     }
@@ -257,6 +277,7 @@
       }
 
       const workHours = workEnd - workStart;
+      const visualHours = workHours + 1;
 
       return `
         <div class="dayCol ${isToday ? 'today' : ''}">
@@ -264,7 +285,7 @@
             <div class="dow">${dow}</div>
             <div class="date">${formatDayMonth(day)}</div>
           </div>
-          <div class="dayBody" style="--workHours:${workHours};">
+          <div class="dayBody" style="--workHours:${workHours}; --visualHours:${visualHours};">
             ${connectors.join('')}
             ${dayBreaks.map(br => renderBreak(br, workStart, hourHeight)).join('')}
             ${daySegs.map(seg => renderSegment(seg, tasks, workStart, now, hourHeight)).join('')}
@@ -359,9 +380,23 @@
       const h = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
       if (h < workStart || h > workEnd) return '';
 
-      const top = 44 + (h - workStart) * hourHeight;
-      const label = `NOW ${formatTimeShort(now)}`;
-      return `<div class="timeLine" data-now-label="${escapeAttr(label)}" style="top:${top}px;"></div>`;
+      const headerOffset = 44;
+      const top = headerOffset + (h - workStart) * hourHeight;
+      return `<div class="timeLine" style="top:${top}px;"></div>`;
+    }
+
+    function renderNowOutside(now, workStart, workEnd, hourHeight){
+      const h = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+      if (h < workStart || h > workEnd) return '';
+
+      const top = (h - workStart) * hourHeight;
+      return `<div class="nowOutside" style="top:${top}px;">NOW</div>`;
+    }
+
+    function renderWorkdayEndLine(workStart, workEnd, hourHeight){
+      const headerOffset = 44;
+      const top = headerOffset + (workEnd - workStart) * hourHeight;
+      return `<div class="workdayEndLine" style="top:${top}px;"></div>`;
     }
 
     function getWorkWindowForDay(day, settings){
@@ -1524,6 +1559,15 @@
         if (nowMs >= st && nowMs < en) return seg;
       }
       return null;
+    }
+
+    function getIdleCurrentTaskMessage(){
+      if (!Array.isArray(IDLE_CURRENT_TASK_MESSAGES) || IDLE_CURRENT_TASK_MESSAGES.length === 0){
+        return 'No active task right now.';
+      }
+      const idx = Number(runtime.idleMessageIndex) || 0;
+      const safeIdx = ((idx % IDLE_CURRENT_TASK_MESSAGES.length) + IDLE_CURRENT_TASK_MESSAGES.length) % IDLE_CURRENT_TASK_MESSAGES.length;
+      return String(IDLE_CURRENT_TASK_MESSAGES[safeIdx] || 'No active task right now.');
     }
 
     function isTaskInsideCurrentNode(taskId, now){

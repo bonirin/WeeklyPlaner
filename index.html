@@ -76,7 +76,7 @@
     .buttonRow{
       display:flex;
       align-items:center;
-      justify-content:space-between;
+      justify-content:flex-start;
       gap:12px;
       margin-bottom: 10px;
     }
@@ -87,6 +87,7 @@
       align-items:center;
       gap:10px;
       flex-wrap:wrap;
+      flex: 0 0 auto;
     }
 
     .buttonRight{
@@ -94,9 +95,9 @@
     }
 
     .activeNow{
-      border: 1px solid rgba(37,99,235,0.22);
-      background: linear-gradient(180deg, rgba(239,246,255,0.9) 0%, rgba(248,251,255,0.95) 100%);
-      color: #1e3a8a;
+      border: 1px solid rgba(22,163,74,0.24);
+      background: linear-gradient(180deg, rgba(240,253,244,0.96) 0%, rgba(248,255,250,0.98) 100%);
+      color: #14532d;
       border-radius: 12px;
       padding: 10px 12px;
       display:flex;
@@ -109,8 +110,34 @@
     }
 
     .activeNow .muted{
-      color:#475569;
+      color:#3f6212;
       font-weight:600;
+    }
+
+    .currentTaskField{
+      flex: 1 1 420px;
+      min-width: 260px;
+      min-height: 44px;
+      margin: 0;
+      padding: 10px 12px;
+      flex-wrap: nowrap;
+      overflow: hidden;
+    }
+
+    .currentTaskField .currentMain{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .currentTaskField .muted{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex-shrink: 1;
+      min-width: 120px;
+      text-align: right;
     }
 
     .btn{
@@ -182,6 +209,57 @@
       overflow: hidden;
     }
 
+    .calendarLayout{
+      flex: 1;
+      min-height: 0;
+      display:grid;
+      grid-template-columns: 74px minmax(0, 1fr);
+      gap: 8px;
+      align-items:start;
+    }
+
+    .timeRail{
+      position: relative;
+      min-width: 74px;
+      display:flex;
+      flex-direction:column;
+      pointer-events:none;
+    }
+
+    .timeRailHeader{
+      height: 44px;
+      flex: 0 0 44px;
+    }
+
+    .timeRailBody{
+      position: relative;
+      height: calc(var(--visualHours) * var(--hourHeight));
+    }
+
+    .railHourLabel{
+      position:absolute;
+      right: 6px;
+      transform: translateY(-50%);
+      font-size: 11px;
+      color: rgba(100,116,139,0.72);
+      pointer-events:none;
+      white-space: nowrap;
+      letter-spacing: .01em;
+    }
+
+    .nowOutside{
+      position:absolute;
+      right: 6px;
+      transform: translateY(-50%);
+      font-size: 10px;
+      letter-spacing: .12em;
+      color: rgba(37,99,235,0.82);
+      font-weight: 800;
+      white-space: nowrap;
+      text-transform: uppercase;
+      pointer-events:none;
+    }
+
     .calendarShell{
       border: 1px solid var(--border);
       border-radius: var(--radius);
@@ -196,7 +274,7 @@
 
     .weekGrid{
       display:grid;
-      grid-template-columns: 60px repeat(7, 1fr);
+      grid-template-columns: repeat(7, 1fr);
       flex: 1;
       overflow-y: hidden;
       overflow-x: auto;
@@ -264,7 +342,7 @@
 
     .dayBody{
       position: relative;
-      height: calc(var(--workHours) * var(--hourHeight));
+      height: calc(var(--visualHours) * var(--hourHeight));
       background:
         linear-gradient(to bottom, rgba(2,6,23,0.04) 1px, transparent 1px) 0 0 / 100% calc(var(--hourHeight)),
         linear-gradient(to bottom, rgba(2,6,23,0.02), rgba(2,6,23,0.01));
@@ -289,24 +367,23 @@
       left:0;
       right:0;
       height:2px;
-      background: linear-gradient(90deg, rgba(37,99,235,0.9), rgba(37,99,235,0.9));
-      box-shadow: 0 10px 24px rgba(37,99,235,0.22);
+      background: rgba(37,99,235,0.5);
+      box-shadow: 0 8px 16px rgba(37,99,235,0.14);
       z-index: 15;
+      pointer-events:none;
     }
     .timeLine::before{
-      content: attr(data-now-label);
+      display:none;
+    }
+
+    .workdayEndLine{
       position:absolute;
-      left: 65px;
-      top: -12px;
-      font-size: 10px;
-      letter-spacing: .12em;
-      color: rgba(37,99,235,0.9);
-      font-weight: 800;
-      background: rgba(255,255,255,0.85);
-      padding: 2px 6px;
-      border-radius: 999px;
-      border: 1px solid rgba(37,99,235,0.22);
-      white-space: nowrap;
+      left:0;
+      right:0;
+      height:1px;
+      background: rgba(239,68,68,0.22);
+      z-index: 11;
+      pointer-events:none;
     }
 
     .taskBlock{
@@ -968,6 +1045,6 @@
 <body>
   <div class="app" id="app"></div>
 
-<script src="weekly_scheduler_app_v2.js?v=20260210-1445"></script>
+<script src="weekly_scheduler_app_v2.js?v=20260210-1538"></script>
 </body>
 </html>
