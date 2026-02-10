@@ -8,9 +8,9 @@
     const STORAGE_KEY = 'weekly_scheduler_v1';
     const LEGACY_STORAGE_KEY = 'weeklySchedulerState';
     const DEBUG = true;
-    const APP_BUILD = '2026-02-09T23:42:00Z';
+    const APP_BUILD = '2026-02-10T14:05:00Z';
 
-    /** @typedef {{ id:string; name:string; createdAt:string; deadline:string; initialEstimateMs:number; estimateMs:number; loggedMs:number; status:'active'|'done'|'archived'; completedAt?:string; lastProgressAt?:string; lastEditedAt?:string; }} Task */
+    /** @typedef {{ id:string; name:string; createdAt:string; deadline:string; initialEstimateMs:number; estimateMs:number; loggedMs:number; assumedMs:number; status:'active'|'done'|'archived'; completedAt?:string; lastProgressAt?:string; lastEditedAt?:string; }} Task */
     /** @typedef {{ taskId:string; start:string; end:string; }} Segment */
     /** @typedef {{ breakId:string; start:string; end:string; }} BreakSegment */
     /** @typedef {{ maxHoursPerDay:number; workStart:string; workEnd:string; workDays:boolean[]; timeStepMin:number; }} Settings */
@@ -41,13 +41,12 @@
     };
     const splitLogMemo = new Set();
 
-    let lastMinuteKey = '';
     let modalStack = [];
 
     if (!Array.isArray(state.schedule)) state.schedule = [];
     if (!Array.isArray(state.breaks)) state.breaks = [];
     debugLog('script_loaded', { build: APP_BUILD, href: location.href, storageKey: STORAGE_KEY });
-    rebuildSchedule('boot', false);
+    syncActiveRuntime(new Date());
     render();
     setInterval(tick, 1000);
     initializeAutoPersistence();
@@ -84,16 +83,9 @@
 
     function tick(){
       const now = new Date();
-      const minuteKey = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}-${pad2(now.getHours())}-${pad2(now.getMinutes())}`;
-
-      if (minuteKey !== lastMinuteKey){
-        lastMinuteKey = minuteKey;
-        rebuildSchedule('minute tick', false);
-      } else {
-        const changed = syncActiveRuntime(now);
-        if (changed){
-          saveState(state, 'tick:runtime_changed');
-        }
+      const changed = syncActiveRuntime(now);
+      if (changed){
+        saveState(state, 'tick:runtime_changed');
       }
 
       render();
@@ -138,6 +130,7 @@
                 <button id="btnAddTask" type="button" class="btn primary" onclick="openNewTask()">Add task</button>
               </div>
               <div class="buttonRight">
+                <button id="btnReschedule" type="button" class="btn warn" onclick="rescheduleAll()">Reschedule</button>
                 <button id="btnFullTaskList" type="button" class="btn" onclick="openTaskList()">Full task list</button>
                 <button id="btnSettings" type="button" class="btn ghost" onclick="openSettings()">Settings</button>
               </div>
@@ -148,7 +141,7 @@
                 <span class="muted">Active for ${formatDurationMs(activeElapsed)} (${formatTimeRange(new Date(activeSeg.start), new Date(activeSeg.end))})</span>
               ` : `
                 <span>No active task right now.</span>
-                <span class="muted">Planner auto-reschedules unfinished tasks each minute.</span>
+                <span class="muted">Node Reschedule forces full-length; other rebuilds apply assumed progress.</span>
               `}
             </div>
           </div>
@@ -165,6 +158,9 @@
 
       const listBtn = app.querySelector('#btnFullTaskList');
       if (listBtn) listBtn.onclick = () => window.openTaskList();
+
+      const rescheduleBtn = app.querySelector('#btnReschedule');
+      if (rescheduleBtn) rescheduleBtn.onclick = () => window.rescheduleAll();
 
       const settingsBtn = app.querySelector('#btnSettings');
       if (settingsBtn) settingsBtn.onclick = () => window.openSettings();
@@ -256,7 +252,7 @@
         const h = dt.getHours() + dt.getMinutes() / 60;
         if (h >= workStart && h <= workEnd){
           const top = (h - workStart) * hourHeight;
-          connectors.push(`<button class="segmentConnector" style="top:${top}px;" onclick="createBreakAtConnector('${dt.toISOString()}')" title="Add break"></button>`);
+          connectors.push(`<button class="segmentConnector" style="top:${top}px;" onclick="createBreakAtConnector('${getIso(dt)}')" title="Add break"></button>`);
         }
       }
 
@@ -299,6 +295,7 @@
       const progress = isCurrent ? clamp((now.getTime() - st.getTime()) / Math.max(1, en.getTime() - st.getTime()), 0, 1) : 0;
       const showTopEdge = seg.showTopEdge !== false;
       const showBottomEdge = seg.showBottomEdge !== false;
+      const showReschedule = task.status === 'active' && now.getTime() >= st.getTime();
 
       const cls = [
         isCurrent ? 'current' : '',
@@ -326,6 +323,7 @@
               <button class="taskAction ok" onclick="event.stopPropagation(); completeTask('${escapeAttr(task.id)}')">Completed</button>
               <button class="taskAction" onclick="event.stopPropagation(); openPartialComplete('${escapeAttr(task.id)}')">Partially</button>
               <button class="taskAction" onclick="event.stopPropagation(); openEditTask('${escapeAttr(task.id)}')">Change</button>
+              ${showReschedule ? `<button class="taskAction warn" onclick="event.stopPropagation(); rescheduleTask('${escapeAttr(task.id)}', '${escapeAttr(seg.start)}', '${escapeAttr(seg.end)}')">Reschedule</button>` : ''}
               <button class="taskAction danger" onclick="event.stopPropagation(); deleteTask('${escapeAttr(task.id)}')">Delete</button>
             </div>
           </div>
@@ -349,6 +347,7 @@
       return `
         <div class="breakBlock ${compactBreak ? 'compact' : ''}" style="top:${top}px; height:${height}px;" data-break-id="${escapeAttr(br.breakId)}">
           <div class="resizeHandle top" onmousedown="startResizeBreak(event, '${escapeAttr(br.breakId)}', true)"></div>
+          <div class="moveHandle" onmousedown="startMoveBreak(event, '${escapeAttr(br.breakId)}')" title="Drag to move break"></div>
           <div class="breakLabel">Break</div>
           <div class="removeBreak" onclick="removeBreak('${escapeAttr(br.breakId)}')">x</div>
           <div class="resizeHandle bottom" onmousedown="startResizeBreak(event, '${escapeAttr(br.breakId)}', false)"></div>
@@ -542,15 +541,12 @@
         if (!br || !br.start || !br.end) continue;
         const bs = new Date(br.start);
         const be = new Date(br.end);
-        if (!isFinite(bs.getTime()) || !isFinite(be.getTime())) continue;
-
-        const clamped = clampBreakToWorkday(bs, be, settings);
-        if (!clamped) continue;
+        if (!isFinite(bs.getTime()) || !isFinite(be.getTime()) || be <= bs) continue;
 
         normalized.push({
           breakId: String(br.breakId || br.id || uid()),
-          start: getIso(clamped.start),
-          end: getIso(clamped.end)
+          start: getIso(bs),
+          end: getIso(be)
         });
       }
 
@@ -567,6 +563,12 @@
     let resizeIsTop = false;
     let resizeStartY = 0;
     let resizeStartTime = 0;
+    let movingBreak = null;
+    let moveStartY = 0;
+    let moveStartStartTime = 0;
+    let moveStartEndTime = 0;
+    let moveDayStartTime = 0;
+    let moveDayEndTime = 0;
 
     window.startResizeBreak = function(e, breakId, isTop){
       e.preventDefault();
@@ -629,6 +631,79 @@
       document.removeEventListener('mouseup', stopResizeBreak);
     }
 
+    window.startMoveBreak = function(e, breakId){
+      e.preventDefault();
+      e.stopPropagation();
+
+      const br = state.breaks.find(b => b.breakId === breakId);
+      if (!br) return;
+
+      const startTime = new Date(br.start).getTime();
+      const endTime = new Date(br.end).getTime();
+      if (!isFinite(startTime) || !isFinite(endTime) || endTime <= startTime) return;
+
+      const day = new Date(br.start);
+      day.setHours(0, 0, 0, 0);
+
+      const [wsh, wsm] = state.settings.workStart.split(':').map(Number);
+      const [weh, wem] = state.settings.workEnd.split(':').map(Number);
+
+      const dayStart = new Date(day);
+      dayStart.setHours(wsh, wsm, 0, 0);
+
+      const dayEnd = new Date(day);
+      dayEnd.setHours(weh, wem, 0, 0);
+
+      movingBreak = breakId;
+      moveStartY = e.clientY;
+      moveStartStartTime = startTime;
+      moveStartEndTime = endTime;
+      moveDayStartTime = dayStart.getTime();
+      moveDayEndTime = dayEnd.getTime();
+
+      document.addEventListener('mousemove', handleMoveBreak);
+      document.addEventListener('mouseup', stopMoveBreak);
+    };
+
+    function handleMoveBreak(e){
+      if (!movingBreak) return;
+
+      const br = state.breaks.find(b => b.breakId === movingBreak);
+      if (!br) return;
+
+      const deltaY = e.clientY - moveStartY;
+      const hourHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--hourHeight') || '84');
+      const deltaMs = (deltaY / hourHeight) * HOUR_MS;
+
+      let nextStart = moveStartStartTime + deltaMs;
+      let nextEnd = moveStartEndTime + deltaMs;
+
+      if (nextStart < moveDayStartTime){
+        const shift = moveDayStartTime - nextStart;
+        nextStart += shift;
+        nextEnd += shift;
+      }
+
+      if (nextEnd > moveDayEndTime){
+        const shift = moveDayEndTime - nextEnd;
+        nextStart += shift;
+        nextEnd += shift;
+      }
+
+      br.start = getIso(new Date(nextStart));
+      br.end = getIso(new Date(nextEnd));
+      render();
+    }
+
+    function stopMoveBreak(){
+      if (movingBreak){
+        rebuildSchedule('break moved');
+        movingBreak = null;
+      }
+      document.removeEventListener('mousemove', handleMoveBreak);
+      document.removeEventListener('mouseup', stopMoveBreak);
+    }
+
     // ------------------------------
     // Task modals
     // ------------------------------
@@ -685,10 +760,11 @@
             id: uid(),
             name,
             createdAt: getIso(new Date()),
-            deadline: new Date(deadline).toISOString(),
+            deadline: getIso(new Date(deadline)),
             initialEstimateMs: estimate * HOUR_MS,
             estimateMs: estimate * HOUR_MS,
             loggedMs: 0,
+            assumedMs: 0,
             status: 'active'
           };
 
@@ -724,7 +800,7 @@
           </div>
           <div>
             <label>Deadline</label>
-            <input type="datetime-local" id="deadline" value="${formatInputDate(new Date(task.deadline))}" />
+            <input type="datetime-local" id="deadline" value="${formatInputDate(parseDateTimeValue(task.deadline))}" />
           </div>
         </div>
 
@@ -777,12 +853,19 @@
 
           task.name = name;
           task.estimateMs = estimate * HOUR_MS;
-          task.deadline = new Date(deadline).toISOString();
+          task.deadline = getIso(new Date(deadline));
+          const prevLoggedMs = Number(task.loggedMs) || 0;
           task.loggedMs = logged * HOUR_MS;
           task.lastEditedAt = getIso(new Date());
 
           saveState(state, 'task:edit');
-          rebuildSchedule('task edited');
+          const now = new Date();
+          const loggedChanged = Math.abs(task.loggedMs - prevLoggedMs) > 1;
+          const shouldResetAssumed = loggedChanged && isTaskInsideCurrentNode(task.id, now);
+          if (shouldResetAssumed){
+            task.assumedMs = 0;
+          }
+          rebuildSchedule('task edited', true, { skipAssumedTaskIds: shouldResetAssumed ? [task.id] : [] });
           closeModal();
         };
       });
@@ -884,6 +967,7 @@
       }
 
       task.loggedMs = Math.max(task.loggedMs, task.estimateMs);
+      task.assumedMs = 0;
       task.status = 'done';
       task.completedAt = getIso(new Date());
 
@@ -898,6 +982,7 @@
 
       task.status = 'active';
       task.completedAt = undefined;
+      task.assumedMs = Number(task.assumedMs) || 0;
       closeModal();
       rebuildSchedule('task reopened');
     }
@@ -926,6 +1011,7 @@
       `, body => {
         body.querySelector('#cancel').onclick = closeModal;
         body.querySelector('#save').onclick = () => {
+          const now = new Date();
           const h = Number(body.querySelector('#hours').value || 0);
           const m = Number(body.querySelector('#minutes').value || 0);
           const addMs = ((Math.max(0, h) * 60) + Math.max(0, m)) * MIN_MS;
@@ -934,12 +1020,17 @@
             return;
           }
 
+          const shouldResetAssumed = isTaskInsideCurrentNode(task.id, now);
+
           if (runtime.activeTaskId === task.id){
-            commitActiveRuntime(new Date());
+            commitActiveRuntime(now);
           }
 
           task.loggedMs += addMs;
           task.actualMs = (Number(task.actualMs) || 0) + addMs;
+          if (shouldResetAssumed){
+            task.assumedMs = 0;
+          }
 
           if (task.loggedMs >= task.estimateMs){
             task.status = 'done';
@@ -947,7 +1038,7 @@
           }
 
           closeModal();
-          rebuildSchedule('task partial complete');
+          rebuildSchedule('task partial complete', true, { skipAssumedTaskIds: shouldResetAssumed ? [task.id] : [] });
         };
       });
     };
@@ -969,6 +1060,21 @@
       rebuildSchedule('task deleted');
     }
     window.deleteTask = deleteTask;
+
+    function rescheduleTask(taskId, segmentStartIso, segmentEndIso){
+      const task = state.tasks.find(t => t.id === taskId);
+      if (!task || task.status !== 'active') return;
+
+      // Node button always means "reschedule this task at full length" (no assumed shortening).
+      task.assumedMs = 0;
+      rebuildSchedule(`task manual reschedule:${task.id}:full`, true, { skipAssumedTaskIds: [task.id] });
+    }
+    window.rescheduleTask = rescheduleTask;
+
+    function rescheduleAll(){
+      rebuildSchedule('manual header reschedule');
+    }
+    window.rescheduleAll = rescheduleAll;
 
     // ------------------------------
     // Settings modal
@@ -1265,7 +1371,12 @@
     // ------------------------------
     // Scheduling
     // ------------------------------
-    function rebuildSchedule(reason, shouldRender = true){
+    function rebuildSchedule(reason, shouldRender = true, options = {}){
+      const now = new Date();
+      if (options.applyAssumed !== false){
+        applyAssumedProgressFromCurrentSchedule(now, options);
+      }
+
       const activeTasks = state.tasks.filter(t => t.status === 'active');
       splitLogMemo.clear();
       debugLog('rebuild_start', {
@@ -1274,10 +1385,9 @@
         breaks: (state.breaks || []).length,
         stepMin: state.settings.timeStepMin
       });
-      state.breaks = normalizeBreakCollection(state.breaks, state.settings);
-      state.schedule = buildSchedule(new Date(), activeTasks, state.settings, state.breaks);
-      state.lastScheduledAt = getIso(new Date());
-      syncActiveRuntime(new Date());
+      state.schedule = buildSchedule(now, activeTasks, state.settings, state.breaks);
+      state.lastScheduledAt = getIso(now);
+      syncActiveRuntime(now);
       debugLog('rebuild_done', { reason, segments: state.schedule.length, breaks: state.breaks.length });
       saveState(state, `rebuild:${reason}`);
       if (shouldRender) render();
@@ -1347,7 +1457,7 @@
       let slotIdx = 0;
 
       for (const task of sorted){
-        let remaining = Math.max(0, (task.estimateMs || 0) - (task.loggedMs || 0));
+        let remaining = Math.max(0, (task.estimateMs || 0) - (task.loggedMs || 0) - (task.assumedMs || 0));
 
         while (remaining > 0 && slotIdx < freeSlots.length){
           const slot = freeSlots[slotIdx];
@@ -1414,6 +1524,57 @@
         if (nowMs >= st && nowMs < en) return seg;
       }
       return null;
+    }
+
+    function isTaskInsideCurrentNode(taskId, now){
+      const seg = getCurrentSegment(now, state.schedule || []);
+      return !!(seg && seg.taskId === taskId);
+    }
+
+    function applyAssumedProgressFromCurrentSchedule(now, options = {}){
+      const skipIds = new Set((options.skipAssumedTaskIds || []).map(id => String(id)));
+      const nowMs = now.getTime();
+      const segsByTask = new Map();
+
+      for (const seg of state.schedule || []){
+        if (!seg || !seg.taskId || !seg.start || !seg.end) continue;
+        if (!segsByTask.has(seg.taskId)) segsByTask.set(seg.taskId, []);
+        segsByTask.get(seg.taskId).push(seg);
+      }
+
+      for (const task of state.tasks || []){
+        if (!task || skipIds.has(String(task.id))) continue;
+
+        const currentAssumed = Number(task.assumedMs) || 0;
+        let nextAssumed = currentAssumed;
+
+        if (task.status !== 'active'){
+          nextAssumed = 0;
+        } else {
+          const logged = Number(task.loggedMs) || 0;
+          const segments = (segsByTask.get(task.id) || []).slice().sort((a, b) => new Date(a.start) - new Date(b.start));
+          const currentSeg = segments.find(seg => {
+            const st = new Date(seg.start).getTime();
+            const en = new Date(seg.end).getTime();
+            return isFinite(st) && isFinite(en) && nowMs >= st && nowMs < en;
+          });
+
+          if (currentSeg){
+            const st = new Date(currentSeg.start).getTime();
+            const en = new Date(currentSeg.end).getTime();
+            const elapsed = clamp(nowMs - st, 0, Math.max(0, en - st));
+            const maxAssumable = Math.max(0, (Number(task.estimateMs) || 0) - logged);
+            nextAssumed = clamp(elapsed, 0, maxAssumable);
+          } else {
+            // If no current segment is under "now", assumed progress is zero.
+            nextAssumed = 0;
+          }
+        }
+
+        if (Math.abs(nextAssumed - currentAssumed) > 1){
+          task.assumedMs = nextAssumed;
+        }
+      }
     }
 
     function syncActiveRuntime(now){
@@ -1527,8 +1688,45 @@
       return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
+    function parseDateTimeValue(value){
+      if (value instanceof Date){
+        return new Date(value.getTime());
+      }
+      if (typeof value === 'number'){
+        return new Date(value);
+      }
+
+      const str = String(value || '');
+      const localMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (localMatch){
+        return new Date(
+          Number(localMatch[1]),
+          Number(localMatch[2]) - 1,
+          Number(localMatch[3]),
+          Number(localMatch[4]),
+          Number(localMatch[5]),
+          Number(localMatch[6] || 0),
+          0
+        );
+      }
+
+      return new Date(str);
+    }
+
     function getIso(d){
-      return d.toISOString();
+      const dt = parseDateTimeValue(d);
+      if (!isFinite(dt.getTime())){
+        return '';
+      }
+      return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}T${pad2(dt.getHours())}:${pad2(dt.getMinutes())}:${pad2(dt.getSeconds())}`;
+    }
+
+    function normalizeDateString(value, fallbackDate){
+      const parsed = parseDateTimeValue(value);
+      if (!isFinite(parsed.getTime())){
+        return getIso(fallbackDate || new Date());
+      }
+      return getIso(parsed);
     }
 
     function pad2(n){
@@ -1603,27 +1801,36 @@
       const cleanTasks = tasks.map(t => ({
         id: String(t.id || uid()),
         name: String(t.name || 'Untitled task'),
-        createdAt: t.createdAt || getIso(new Date()),
-        deadline: t.deadline || getIso(new Date(Date.now() + 24*3600000)),
+        createdAt: normalizeDateString(t.createdAt, new Date()),
+        deadline: normalizeDateString(t.deadline || new Date(Date.now() + 24*3600000), new Date(Date.now() + 24*3600000)),
         initialEstimateMs: Number(t.initialEstimateMs)||Number(t.estimateMs)||3600000,
         estimateMs: Number(t.estimateMs)||3600000,
         loggedMs: Number(t.loggedMs)||0,
+        assumedMs: Number(t.assumedMs)||0,
         actualMs: Number(t.actualMs)||0,
         status: (t.status === 'done' || t.status === 'archived') ? 'done' : 'active',
-        completedAt: t.completedAt,
-        lastProgressAt: t.lastProgressAt,
-        lastEditedAt: t.lastEditedAt
+        completedAt: t.completedAt ? normalizeDateString(t.completedAt, new Date()) : undefined,
+        lastProgressAt: t.lastProgressAt ? normalizeDateString(t.lastProgressAt, new Date()) : undefined,
+        lastEditedAt: t.lastEditedAt ? normalizeDateString(t.lastEditedAt, new Date()) : undefined
       }));
 
       const schedule = Array.isArray(raw.schedule) ? raw.schedule : [];
       const cleanSchedule = schedule
         .filter(x => x && x.taskId && x.start && x.end)
-        .map(x => ({ taskId: String(x.taskId), start: String(x.start), end: String(x.end) }));
+        .map(x => ({
+          taskId: String(x.taskId),
+          start: normalizeDateString(x.start, new Date()),
+          end: normalizeDateString(x.end, new Date())
+        }));
 
       const breaks = Array.isArray(raw.breaks) ? raw.breaks : [];
       const cleanBreaks = normalizeBreakCollection(breaks
         .filter(x => x && x.start && x.end)
-        .map(x => ({ breakId: String(x.breakId || x.id || uid()), start: String(x.start), end: String(x.end) })), s);
+        .map(x => ({
+          breakId: String(x.breakId || x.id || uid()),
+          start: normalizeDateString(x.start, new Date()),
+          end: normalizeDateString(x.end, new Date())
+        })), s);
 
       return { settings: s, tasks: cleanTasks, schedule: cleanSchedule, breaks: cleanBreaks, lastScheduledAt: raw.lastScheduledAt };
     }
@@ -1657,9 +1864,13 @@
             const raw = JSON.parse(text);
             stage = 'sanitize_state';
             const cleaned = sanitizeState(raw);
-            stage = 'rebuild_schedule';
-            cleaned.schedule = buildSchedule(new Date(), cleaned.tasks.filter(t => t.status === 'active'), cleaned.settings, cleaned.breaks);
-            cleaned.lastScheduledAt = getIso(new Date());
+            stage = 'load_schedule_or_recover';
+            if (!Array.isArray(cleaned.schedule)) cleaned.schedule = [];
+            if (cleaned.schedule.length === 0 && cleaned.tasks.some(t => t.status === 'active')){
+              cleaned.schedule = buildSchedule(new Date(), cleaned.tasks.filter(t => t.status === 'active'), cleaned.settings, cleaned.breaks);
+              cleaned.lastScheduledAt = getIso(new Date());
+              debugWarn('load_recovered_empty_schedule', { activeTasks: cleaned.tasks.filter(t => t.status === 'active').length });
+            }
             stage = 'persist_cleaned';
             saveState(cleaned, `load:migrated_from:${loadedFrom}`);
             stage = 'log_success';
